@@ -1,0 +1,449 @@
+---
+title: "ProblemSet 5_Aijing_Gao"
+author: "Aijing Gao"
+date: "November 11, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(randomForest)
+library(data.table)
+library(splines)
+library(mgcv)
+library(glmnet)
+library(rpart)
+library(MASS)
+library(lars)
+library(htmlTable)
+library(fmsb)
+library(xlsx)
+library(leaps)
+library(bestglm)
+library(caret)
+library(SuperLearner)
+library(pROC)
+library(foreach)
+library(doMC)
+library(coefplot)
+registerDoMC(3)
+```
+
+## Simulation
+
+1. Optimal Functional Forms:
+
+LASSO, CART, GAM has different advantage in different scenario:
+
+* LASSO perform well when predictors have strong correlation
+* GAM is capable of capturing non-linearities
+* CART is good for modeling heterogenity (i.e. interactions)
+
+To compare their model performance, here I simulated three datasets:
+
+* dat1: linear model with highly correlated variables: $Y=X_1+X_2+Noise$ while $X_1$ and $X_2$ are highly correlated
+* dat2: models with mixed parametric model: $Y=X_1^2+sin(\pi X_2)+Noise$
+* dat3: model with interaction term: $Y=X_1+X_2+X_1*X_2+Noise$
+
+```{r, echo=FALSE}
+###Function to plot multiple gg-plots
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+
+```{r}
+##simulated dat1 with strong multicolinearity
+obs = 8000
+vars = 2
+set.seed(20)
+X1<-rnorm(obs)
+X2<-X1+0.01*rnorm(obs)
+dat1<-data.frame(X1, X2)
+#y=X1+X2+noise
+dat1$Y<-with(dat1, 0.3*X1+0.1*X2+0.05*rnorm(obs))
+
+##simulated dat2 with mixed parametric model
+set.seed(12)
+t = data.frame(replicate(vars,rnorm(obs)))
+#create target by hidden function
+Y = with(t, X1^2 + sin(X2*pi) + 0.5 * rnorm(obs)) 
+dat2<-data.frame(t, Y)
+
+##simulated a categorical variable with interaction
+set.seed(78)
+t = data.frame(replicate(vars,rnorm(obs)))
+#y=X1+X2+5*X1*X2+noise
+Y = with(t, X1+X2+5*X1*X2+ 0.5 * rnorm(obs))
+dat3<-data.frame(t, Y)
+
+#relationship between X and Y
+plot(dat1)
+plot(dat2)
+plot(dat3)
+
+```
+
+Run LASSO, GAM, and CART independently:
+```{r}
+combine_pred<-function(dat, ratio = 0.8){
+  set.seed(124)
+  ind<-sample(1:nrow(dat), size=ratio*nrow(dat))
+  train<-dat[ind,]
+  test<-dat[-ind,]
+  #LASSO
+  fitLasso<-cv.glmnet(train$Y, x = as.matrix(train[,colnames(train)!="Y"]), alpha=1, family="gaussian", type.measure = "deviance")
+  predLasso <- predict(fitLasso, s="lambda.min", newx = as.matrix(test[,colnames(test)!="Y"]))
+  #GAM
+  fitGam <- gam(Y ~ s(X1)+s(X2) , data = train)
+  predGam<-predict(fitGam, test[,-3])
+  #CART
+  tree.cv <- rpart(Y ~ ., data = train)
+  TreePred <- predict(tree.cv, newdata = test[,-3])
+  mse <- function(x) mean((test$Y - x)^2)
+  return(c(mse(predLasso), mse(predGam), mse(TreePred)))
+}
+
+
+results<-data.frame(dat1 = combine_pred(dat1), dat2 = combine_pred(dat2), dat3 = combine_pred(dat3))
+results<-data.frame(t(results))
+names(results)<-c("LASSO", "GAM", "CART")
+htmlTable::htmlTable(txtRound(results, digits =4), caption = "Table 1. Summarized results of prediction accuracy by different learning algorithm")
+
+```
+
+##Working with the data
+2. Variable Selection Algorithms
+
+Here I used 4 algorithms to deal with the mice data whose variables are highly correlated with each other. The data was scaled before applying the model selection algorithm. A level plot was created to demonstrate the beta coefficients.
+
+Results:
+
+* Forward selection: 38 variables were selected in the model.
+* Backward selection: 40 variables were selected in the model. The beta coefficients are in very large scale, suggesting backward selection isn't a suitable technique in dealing with the mice data.
+* Ridge: shrunk the beta coefficients but not to 0. The range of beta estimates in relatively smaller than other techniques (-0.47-1.41)
+* LASSO: some beta coefficents were shrinked to 0. Total 48 variables were selected in the model.
+
+Since models from Forward selection and backward selection were in very different scales with Ridge and LASSO, I included ridge and LASSO models in level plot and created coefficient plots for Forward (Left) and backward selection (Right) respectively.
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+#set working directory
+setwd("C:/Users/bitga/Downloads/")
+mice_dat<-read.xlsx("Data_Cortex_Nuclear.xls", 1, header = TRUE)
+mice_dat$MouseID<-as.character(mice_dat$MouseID)
+N_NA<-sapply(mice_dat[,c(2:78)], function(x) sum(is.na(x)))
+N_NA<-N_NA/dim(mice_dat)[1]
+#remove variables with more than 10% missing values
+gene<-mice_dat
+gene<-gene[,!names(gene)%in%names(N_NA)[which(N_NA>=0.1)]]
+#a simple function to perform mean imputation
+NA2mean <- function(x) replace(x, is.na(x), mean(x, na.rm = TRUE))
+gene[,c(2:73)]<-lapply(gene[,c(2:73)], NA2mean)
+dat<-gene[,c(2:74)]
+dat$Genotype<-ifelse(dat$Genotype=="Ts65Dn", 1, 0)
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+#get beta estimate from different techniques for model selection
+#forward selection
+fit <- glm(Genotype ~ 1, family = "binomial", data = dat)
+sFor <- stepAIC(fit, direction = "forward", trace = F, scope = 
+                list(lower = ~1, upper = ~ DYRK1A_N + ITSN1_N + BDNF_N + NR1_N + NR2A_N + pAKT_N + pBRAF_N + 
+                                           pCAMKII_N + pCREB_N + pELK_N + pERK_N + pJNK_N + PKCA_N + 
+                                           pMEK_N + pNR1_N + pNR2A_N + pNR2B_N + pPKCAB_N + pRSK_N + 
+                                           AKT_N + BRAF_N + CAMKII_N + CREB_N + ELK_N + ERK_N + GSK3B_N + 
+                                           JNK_N + MEK_N + TRKA_N + RSK_N + APP_N + Bcatenin_N + SOD1_N + 
+                                           MTOR_N + P38_N + pMTOR_N + DSCR1_N + AMPKA_N + NR2B_N + pNUMB_N + 
+                                           RAPTOR_N + TIAM1_N + pP70S6_N + NUMB_N + P70S6_N + pGSK3B_N + 
+                                           pPKCG_N + CDK5_N + S6_N + ADARB1_N + AcetylH3K9_N + RRP1_N + 
+                                           BAX_N + ARC_N + ERBB4_N + nNOS_N + Tau_N + GFAP_N + GluR3_N + 
+                                           GluR4_N + IL1B_N + P3525_N + pCASP9_N + PSD95_N + SNCA_N + 
+                                           Ubiquitin_N + pGSK3B_Tyr216_N + SHH_N + pS6_N + pCFOS_N + 
+                                           SYP_N + CaNA_N))
+t<-c(sFor$coefficients, rep(0, 35))
+names(t)[39:73]<-colnames(dat[,-73])[!colnames(dat[,-73])%in%names(sFor$coefficients)]
+temp<-t(as.data.frame(t))[,c("(Intercept)", colnames(dat)[1:72])]
+#backward seletion
+fit <- glm(Genotype ~ ., family = "binomial", data = dat)
+sBack <- stepAIC(fit, trace = F, direction = "backward")
+t<-c(sBack$coefficients, rep(0, 33))
+names(t)[41:73]<-colnames(dat[,-73])[!colnames(dat[,-73])%in%names(sBack$coefficients)]
+temp2<-t(as.data.frame(t))[,c("(Intercept)", colnames(dat)[1:72])]
+#Ridge regression
+fit.ridge.cv <- cv.glmnet(as.matrix(dat[,c(1:72)]), dat$Genotype, type.measure="deviance",  alpha=0, family="binomial", parallel = TRUE)
+#lasso regression
+fit.lasso.cv <- cv.glmnet(as.matrix(dat[,c(1:72)]), dat$Genotype, type.measure="deviance",  alpha=1, family="binomial", parallel = TRUE)
+```
+
+```{r, echo=FALSE, warning=FALSE, fig.height=9, fig.width=4, message=FALSE}
+#create a level plot to demonstrate the beta estimates
+beta = data.frame( Forward = temp,
+                   Backward = temp2)
+beta$Ridge<-summary(coef(fit.ridge.cv))$x
+LASSO=NULL
+for(i in 1:73){LASSO[i]=coef(fit.lasso.cv)[i]}
+beta$LASSO<-LASSO
+dt0<-t(beta)[,-1]
+diverge0 <- function(p, ramp) {
+  # p: a trellis object resulting from rasterVis::levelplot
+  # ramp: the name of an RColorBrewer palette (as character), a character 
+  #       vector of colour names to interpolate, or a colorRampPalette.
+  require(RColorBrewer)
+  require(rasterVis)
+  if(length(ramp)==1 && is.character(ramp) && ramp %in% 
+     row.names(brewer.pal.info)) {
+    ramp <- suppressWarnings(colorRampPalette(brewer.pal(11, ramp)))
+  } else if(length(ramp) > 1 && is.character(ramp) && all(ramp %in% colors())) {
+    ramp <- colorRampPalette(ramp)
+  } else if(!is.function(ramp)) 
+    stop('ramp should be either the name of a RColorBrewer palette, ', 
+         'a vector of colours to be interpolated, or a colorRampPalette.')
+  rng <- range(p$legend[[1]]$args$key$at)
+  s <- seq(-max(abs(rng)), max(abs(rng)), len=1001)
+  i <- findInterval(rng[which.min(abs(rng))], s)
+  zlim <- switch(which.min(abs(rng)), `1`=i:(1000+1), `2`=1:(i+1))
+  p$legend[[1]]$args$key$at <- s[zlim]
+  p$par.settings$regions$col <- ramp(1000)[zlim[-length(zlim)]]
+  p
+}
+
+p<-levelplot(dt0[c(3:4),], xlab = "Approach", 
+             ylab = "Beta coefficient", 
+             cex.axis=1,
+             pretty = TRUE,
+             scales=list(x=list(cex=0.5, rot=45), y=list(cex=0.6)),
+             at=seq(-30,30, length.out=120))
+p<-diverge0(p, ramp='RdBu') 
+p
+```
+
+```{r, echo=FALSE, fig.height=9, fig.width=7, message=FALSE, warning=FALSE}
+p1<-coefplot(sFor)
+p2<-coefplot(sBack)
+multiplot(p1, p2, cols = 2)
+
+```
+
+(b) Use Cross-Validation to assess which approach performs best:
+Here 10-fold cross-validation was used to compare the 4 different models and AUC (c-statistics) was used to measure prediction accuracy.
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+#this function returns CV test error (V: k-fold; Model: LASSO, Ridge, backward, forward)
+cv_test_error<-function(data, V, Model){
+  .doFit <- function(v, folds, data, Model){ #Train/test glmnet for each fold
+    dat<-data[-folds[[v]],]
+    #four different models
+    if(Model=="LASSO"){
+      fit<-cv.glmnet(as.matrix(dat[,c(1:72)]), dat$Genotype, type.measure="deviance",  alpha=1, family="binomial", parallel = TRUE)
+      pred <- predict(fit, s="lambda.min", newx = as.matrix(data[folds[[v]],colnames(data)!="Genotype"]))
+    }
+    
+    if(Model=="Ridge"){
+      fit<-cv.glmnet(as.matrix(dat[,c(1:72)]), dat$Genotype, type.measure="deviance",  alpha=0, family="binomial", parallel = TRUE)
+      pred <- predict(fit, s="lambda.min", newx = as.matrix(data[folds[[v]],colnames(data)!="Genotype"]))
+    }
+    
+    if(Model=="Forward"){
+      fit <- glm(Genotype ~ 1, family = "binomial", data = dat)
+      sFor <- stepAIC(fit, direction = "forward", trace = F, scope = 
+                list(lower = ~1, upper = ~ DYRK1A_N + ITSN1_N + BDNF_N + NR1_N + NR2A_N + pAKT_N + pBRAF_N + 
+                                           pCAMKII_N + pCREB_N + pELK_N + pERK_N + pJNK_N + PKCA_N + 
+                                           pMEK_N + pNR1_N + pNR2A_N + pNR2B_N + pPKCAB_N + pRSK_N + 
+                                           AKT_N + BRAF_N + CAMKII_N + CREB_N + ELK_N + ERK_N + GSK3B_N + 
+                                           JNK_N + MEK_N + TRKA_N + RSK_N + APP_N + Bcatenin_N + SOD1_N + 
+                                           MTOR_N + P38_N + pMTOR_N + DSCR1_N + AMPKA_N + NR2B_N + pNUMB_N + 
+                                           RAPTOR_N + TIAM1_N + pP70S6_N + NUMB_N + P70S6_N + pGSK3B_N + 
+                                           pPKCG_N + CDK5_N + S6_N + ADARB1_N + AcetylH3K9_N + RRP1_N + 
+                                           BAX_N + ARC_N + ERBB4_N + nNOS_N + Tau_N + GFAP_N + GluR3_N + 
+                                           GluR4_N + IL1B_N + P3525_N + pCASP9_N + PSD95_N + SNCA_N + 
+                                           Ubiquitin_N + pGSK3B_Tyr216_N + SHH_N + pS6_N + pCFOS_N + 
+                                           SYP_N + CaNA_N))
+       pred <- predict(sFor, newdata=data[folds[[v]],], type = "response")
+    }
+    
+    if(Model=="Backward"){
+      fit <- glm(Genotype ~ ., family = "binomial", data = dat)
+      sBack <- stepAIC(fit, trace = F, direction = "backward")
+      pred <- predict(sBack, newdata=data[folds[[v]],], type = "response")
+    }
+    return(pred)
+  }
+  #set up seed
+  set.seed(111)
+  folds <- split(c(1:nrow(data)), c(1:V)) #Create folds
+  predictions <- unlist(lapply(seq(V), function(v) .doFit(v, folds, data, Model)))
+  category<-data$Genotype[unlist(folds)]
+  category<-factor(category)
+  roc_obj <- roc(category, predictions)
+  return(auc(roc_obj))
+}
+#LASSO
+LASSO_error<-cv_test_error(dat, 10, "LASSO")
+#ridge
+Ridge_error<-cv_test_error(dat, 10, "Ridge")
+#forward
+For_error<-cv_test_error(dat, 10, "Forward")
+#backward
+Back_error<-cv_test_error(dat, 10, "Backward")
+
+results2<-data.frame(Forward= For_error,
+                     Backward = Back_error,
+                     Ridge = Ridge_error,
+                     LASSO = LASSO_error)
+#summarize results
+htmlTable::htmlTable(txtRound(results2, digits =3), caption = "Table 2. c-statistics after using different learning algorithms")
+```
+
+
+As indicated by the results, I think the LASSO is best technique for model selection in dealing with this dataset.
+
+3. Random Forest
+
+I set up a tuning parameter grid with different mtry and nodesize respectively using functions in random forest packages
+
+
+```{r}
+
+#tuning by changing mtry
+mtry<-seq(2, 20, by = 2)
+OOB_mtry = NULL
+for(i in 1:length(mtry)){
+   set.seed(222)
+   model <- randomForest(factor(Genotype)~., data=dat, mtry = mtry[i], importance=TRUE)
+   OOB_mtry[i]<-mean( predict( model ) != dat$Genotype )
+}
+
+#tuning by changing nodesize
+node<-seq(1, 30, by = 2)
+OOB=NULL
+for(i in 1:length(node)){
+  set.seed(222)
+  model <- randomForest(factor(Genotype)~., data=dat, nodesize = node[i], importance=TRUE)
+  OOB[i]<-mean( predict( model ) != dat$Genotype )
+}
+
+#visualize the results
+q1<-qplot(mtry, OOB_mtry)+ylab("OOB error rate")+ylim(0, 0.1)
+q2<-qplot(node, OOB)+ylab("OOB error rate")
+q<-multiplot(q1, q2)
+```
+
+Comments: The optimal mtry=6 and optimal nodesize = 9. Besides, I found nodesize tended to have a greater impact on OOB error rate.
+
+4. Variable Selection
+
+(a). Perform multiple T test
+
+After controlling FDR as 0.1, we found 44 variables as significant variables.
+```{r}
+t_test<-function(dat, i){
+  return(t.test(dat[dat$Genotype==1,i], dat[dat$Genotype==0,i])$p.value)
+}
+
+raw.pval<-unlist(lapply(1:72, function(x) t_test(dat, x)))
+BH<-p.adjust(raw.pval, method = "BH")
+sum(BH<=0.1)
+```
+
+(b). Identify top variables:
+
+From LASSO, we found 48 variables were selected in the model, among which 31 variables were with the top marginal association. The name of top marginal association was printed as below:
+```{r}
+t<-names(dat)[1:72][which(BH<=0.1)]%in%names(dat)[1:72][which(LASSO[-1]!=0)]
+sum(t)
+names(dat[,c(1:72)])[t]
+```
+
+All the variables were values for gene expression, which are in the same scale. Thus, it's not necessary to scale the data ahead of time.
+
+(c). Calculate gini and permutation importance:
+```{r}
+model <- randomForest(factor(Genotype)~., data=dat, nodesize = 9, mtry = 6, importance=TRUE)
+#permutation importance
+importance(model, type = 1, scale = FALSE)
+#gini importance
+importance(model, type = 2, scale = FALSE)
+```
+
+(d). Compare importance of variables from different procedures: I compared absolute value of beta coefficients from LASSO, ordering of p-value from MTP, permutation importance, and gini importance from random forest. As indicated by the results (Table 3), different procedure have different results on variable importance.
+```{r}
+names(LASSO)<-c("Intercept",names(dat)[1:72])
+imp<-data.frame(LASSO0 = names(LASSO[-1])[order(abs(LASSO[-1]), decreasing = TRUE)],
+                MTP = names(dat)[1:72][order(BH)],
+                RF = names(dat)[1:72][order(importance(model, type = 1, scale = FALSE), decreasing = TRUE)],
+                Gini = names(dat)[1:72][order(importance(model, type = 2, scale = FALSE), decreasing = TRUE)])
+colnames(imp)<-c("LASSO", "MTP", "Permutation Importance","Gini Importance")
+htmlTable::htmlTable(imp[1:10,], caption = "Table 3. Variable importance from different procedures")
+```
+
+
+5. Stacking
+(a). I plan to use random forest and LASSO logistic regression from glmnet.
+
+(b). Apply CV.SuperLearner() to apply cross-validation. The SuperLearner error rate represents the proportion of misclassification over the entire data. In this problem, risk (performance metrics) was measured based on mean squared error.
+
+```{r}
+# Set the seed for reproducibility.
+set.seed(123)
+sl = CV.SuperLearner(Y = dat$Genotype, X = dat[,c(1:72)], family = binomial(),
+                     SL.library = c("SL.glmnet", "SL.randomForest"), parallel = "multicore")
+summary(sl)
+sl$coef
+```
+
+(c). According to the coefficients (weights) and risk by the two models, we could conclude the LASSO regression outperformed than random forest. The mean squared error for LASSO is 0.0227 and for random forest is 0.0316. The error rate for super learner is 0.02.
+
+(d). Find the running time:
+```{r}
+# Review how long it took to run the SuperLearner:
+system.time(sl <- CV.SuperLearner(Y = dat$Genotype, X = dat[,c(1:72)], family = binomial(),
+                     SL.library = c("SL.glmnet", "SL.randomForest"), parallel = "multicore"))
+```
+
+It takes a long time to run superleaner. However, I found the risk was not significantly reduced after stacking the two algorithms compared to using LASSO regression alone. It may be not very valueable to do stacking since LASSO could already give pretty good prediction.
+
+
+6. Developing A prediction model:
+
+(b). Data imputation:
+
+* remove variables with more than 10% missing values
+* perform mean imputation on the variables that have less than 10% missing values
+
+(c). From the results of questions in this homework, I think LASSO regression is the best model. Thus, a LASSO regression was fit 
+
+(d). Mean squared loss was used to measure the accuracy of the prediction model. From the output of R, I found the MSE is 0.02027.
+
+Detailed code and Rdata was seen in the attachment (Aijing_Gao_PS5_Q6.R and MouseData.RData).

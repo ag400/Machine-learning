@@ -1,0 +1,533 @@
+---
+title: 'Problem Set #4'
+author: "Aijing Gao"
+date: "October 17, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+```
+
+## Simulation
+
+1. Overfitting
+(a)
+```{r, message=FALSE, warning=FALSE}
+library(mvtnorm)
+library(ggplot2)
+library(hydroGOF)
+library(boot)
+library(plotly)
+library(pander)
+library(caret)
+library(magrittr)
+library(xyTable)
+set.seed(444)
+sigma0<-diag(rep(1, 100))
+dat<-as.data.frame(rmvnorm(n=1000, mean = rep(0,100), sigma = sigma0))
+colnames(dat)<-paste0("V",1:100)
+dat$Y<-rnorm(1000, 0, 1)
+#calculate pairwise correlation and p-value
+correlation<-sapply(1:100, function(i) {cor(dat[,i], dat$Y)})
+p_value<-sapply(1:100, function(i){cor.test(dat[,i], dat$Y)$p.value})
+sum(p_value<0.1)
+```
+
+
+Total 13 p-values are less than 0.1. The expected number of p-value less than 10 should be:
+$$100*\%10=10$$
+
+(b). To estimate accuracy of prediction, I choose root mean squared error (RMSE) as performance metrics for linear regression.
+$$RMSE=\sqrt{\frac{SSE}{n}}$$
+
+```{r, message=FALSE}
+#this function returns mean squared error for training dataset
+get_train_error<-function(dat, p){
+  p_value<-sapply(1:100, function(i){cor.test(dat[,i], dat$Y)$p.value})
+  choosen_V<-colnames(dat[,c(1:100)])[p_value<p]#choose variables with p-value less than threshold p
+  if(length(choosen_V)>0){
+        formula0<-as.formula(paste("Y~", paste(choosen_V, collapse = "+")))}else{
+        formula0<-as.formula(paste("Y ~ 1"))
+  }
+  model<-lm(formula0, data = dat)
+  return(rmse(model$fitted.values, dat$Y))
+}
+
+#calculate training error for data and p-value
+get_train_error(dat, 0.1)
+#set different thresholds
+result<-do.call(rbind, lapply(seq(0, 1, 0.05), function(x){
+  RMSE<-get_train_error(dat, x)
+  return(data.frame(threshold = x, error = RMSE))
+})
+)
+
+```
+After removing variables with p-values greater than 0.1, we got a training error of 0.926. By setting different threshold, I found the training error is reduced as the threshold for p-value increases (Fig 1).
+
+(c) After simulating a test data with a size of 5000*100, I found the test error is increased as p-value increases (Fig 1).
+
+```{r, message=FALSE}
+#this function returns mean squared error for testing
+get_test_error<-function(dat, test, p){
+  p_value<-sapply(1:100, function(i){cor.test(dat[,i], dat$Y)$p.value})
+  choosen_V<-colnames(dat[,c(1:100)])[p_value<p]#choose variables with p-value less than threshold p
+  if(length(choosen_V)>0){
+        formula0<-as.formula(paste("Y~", paste(choosen_V, collapse = "+")))}else{
+        formula0<-as.formula(paste("Y ~ 1"))
+  }
+  model<-lm(formula0, data = dat)
+  prediction<-predict(model, newdata = test[,choosen_V], type = "response")
+  return(rmse(prediction, test$Y))
+}
+
+#simulate a test data (500*100)
+set.seed(1)
+sigma0<-diag(rep(1, 100))
+test<-as.data.frame(rmvnorm(n=5000, mean = rep(0,100), sigma = sigma0))
+colnames(test)<-paste0("V",1:100)
+test$Y<-rnorm(5000, 0, 1)
+#set threshold for p-value
+result2<-do.call(rbind, lapply(seq(0, 1, 0.05), function(x){
+  RMSE<-get_test_error(dat, test, x)
+  return(data.frame(threshold = x, error = RMSE))
+})
+)
+
+#visualize test errors
+comb<-merge(result, result2, by = "threshold")
+p <- plot_ly(comb, x = ~threshold, y = ~error.x, type = 'scatter', mode = 'lines', name = 'Train Error') %>%
+  add_trace(y = ~error.y, name = 'Test Error')%>%
+  layout(legend = list(x = 100, y = 0.5),
+         title = 'Fig 1. Learning Curves for Different P-value Thresholds',
+         xaxis = list(title = 'p-value threshold',
+                      zeroline = TRUE),
+         yaxis = list(title = 'RMSE'))
+p
+
+```
+
+
+(d). Using k-fold CV to estimate test error to determine the optimal p-value threshold:
+
+```{r}
+#this function returns CV test error (V: k-fold; p: p-value threshold)
+cv_test_error<-function(data, V, p){
+  .doFit <- function(v, folds, data, p){ #Train/test glmnet for each fold
+    p_value<-sapply(1:100, function(i){cor.test(data[,i], data$Y)$p.value})
+    choosen_V<-colnames(data[,c(1:100)])[p_value<p]#choose variables with p-value less than threshold p
+    if(length(choosen_V)>0){
+        formula0<-as.formula(paste("Y~", paste(choosen_V, collapse = "+")))}else{
+        formula0<-as.formula(paste("Y ~ 1"))
+    }
+    fit<-lm(formula0, data = data[-folds[[v]],])
+    pred <- predict(fit, newdata=data[folds[[v]],choosen_V], type = "response")
+    return(pred)
+  }
+  
+  folds <- split(c(1:nrow(data)), c(1:V)) #Create folds
+  predictions <- unlist(lapply(seq(V), function(v) .doFit(v, folds, data, p)))
+  cv_error<-rmse(predictions, data$Y[unlist(folds)])
+  return(cv_error)
+}
+
+```
+
+
+```{r, echo=FALSE}
+result3<-do.call(rbind, lapply(seq(0, 1, 0.05), function(x){
+  RMSE<-cv_test_error(dat,10, x)
+  return(data.frame(threshold = x, error = RMSE))
+})
+)
+
+p <- plot_ly(result3, x = ~threshold, y = ~error, type = 'scatter', mode = 'lines', name = 'CV  
+             Error')%>%
+         layout(title = 'Fig 2. 10-fold CV-error for Different P-value Thresholds',
+                xaxis = list(title = 'p-value threshold', zeroline = TRUE),
+                yaxis = list(title = 'RMSE'))
+p
+
+#return p-value with minimum RMSE
+result3[result3$error == min(result3$error), 1]
+```
+
+By 10-fold cross-validation, I found the optimal p-value threshold is 0.2.
+
+2. Bootstrapping
+
+(a) Simulate a data and perform linear regression:
+$$Y=\alpha+\beta X_1+\epsilon$$
+```{r, echo=FALSE}
+set.seed(1234)
+obs = 1000 #how many observations/samples
+X = data.frame(X1 = rnorm(obs))
+alpha = 0
+beta = 0.2
+#create target by hidden function
+Y = with(X, alpha+beta*X1+rnorm(obs)) 
+dat<-data.frame(X=X$X1, Y=Y)
+model<-lm(Y~X, data = dat)
+summary(model)
+```
+
+From the output of regression, we found the estimate of beta is 0.25571 and its confidence interval is:
+$$\hat{\beta}\pm 1.96*SE(\hat{\beta})$$
+which is [0.195, 0.317]. It covers the true $\beta$.
+
+(b). Using boostrapping to estimate $\beta$:
+(i). Plot $\hat{\beta}$ as a histogram.
+```{r}
+bfunc<-function(n, r, data){
+  beta<-NULL
+  for (i in 1:r){
+    ind <- sample(c(1:n),n,replace = T)	# pick random indices
+    beta<-c(beta, lm(Y~X, data = data[ind,])$coef[2])
+  }
+  return(beta)
+}
+
+set.seed(222)
+estimate<-bfunc(obs, 1000, dat)
+p<-qplot(estimate, geom = "histogram", main = "Fig 3. Estimate of beta")
+ggplotly()
+```
+
+(ii). Calculate the CI for $\beta$ using SD method.
+$$\hat{SE(\beta^*)}=\sqrt{\frac{\sum_{i=1}^R(\beta_i^*-\bar{\beta^*})^2}{R-1}}$$
+The CI is:
+$$\beta^*\pm Z_{1-\alpha/2} \hat{SE(\beta^*)}$$
+```{r}
+mean(estimate)+1.96*sqrt(var(estimate))
+mean(estimate)-1.96*sqrt(var(estimate))
+
+```
+
+We conclude the CI for bootstrapping CI using SD method is [0.192, 0.319].
+
+(iii). Calculate the CI for $\beta$ using quantile method. The lower quantile is [(R+1)$\alpha$/2] and the upper quantile is [(R+1)(1-$\alpha$/2)].
+
+```{r}
+estimate[rank(estimate)==round(1001*0.025)]
+estimate[rank(estimate)==round(1001*(1-0.025))]
+```
+
+By quantile method, we found the CI for bootstrap $\beta$ is [0.191, 0.318]
+
+(iv). I found the coverage of CI calculated by SD method is closed to the one calculated by quantile method.
+
+(c). Making 20% data of Y missing: According to the figure 4, I found the $\hat{\beta}$coverage and SE by regressing Ymiss on X is slightly larger than the one without missing value in Y.
+
+```{r, echo=FALSE}
+bfunc2<-function(n, r, data){
+  beta<-NULL
+  for (i in 1:r){
+    ind <- sample(c(1:n),n,replace = T)	# pick random indices
+    beta<-c(beta, lm(Y~X, data = data[ind,])$coef[2])
+  }
+  nc<-2*1.96*sqrt(var(beta))
+  pc<--beta[rank(beta)==round((r+1)*0.025)]+beta[rank(beta)==round((r+1)*(1-0.025))]
+  return(list(beta = beta, nc = nc, pc = pc))
+}
+```
+
+
+```{r, message=FALSE}
+set.seed(11)
+ind <- which(dat$Y %in% sample(dat$Y, length(dat$Y)*0.2))
+dat2<-dat
+dat2$Y[ind]<-NA
+set.seed(222)
+result4<-bfunc2(obs, 1000, dat2)
+Betamiss<-result4$beta
+ncmiss<-result4$nc
+pcmiss<-result4$pc
+
+betacomp<-data.frame(beta=c(estimate, Betamiss), Y = c(rep("No Missing", 1000), rep("Missing", 1000)))
+p<-ggplot(betacomp, aes(x=beta, fill= Y)) +
+    geom_histogram(binwidth=.01, alpha=.5, position="identity")+
+    labs(title = "Fig 4. Comparison of estimate beta with or without missingness")
+ggplotly()
+
+temp0<-data.frame(v1=c(mean(estimate), sqrt(var(estimate)), 2*1.96* sqrt(var(estimate))),
+                 v2=c(mean(Betamiss), ncmiss/(2*1.96), ncmiss))
+colnames(temp0)<-c("No Missing", "Missing")
+row.names(temp0)<-c("Beta", "SE", "Coverage")
+pander(temp0)
+```
+
+(d). Perform mean imputation: I found bootstrapping beta, SE, and coverage get smaller than the one witout missing value.
+
+```{r, echo=FALSE, message=FALSE}
+NA2mean <- function(x) replace(x, is.na(x), mean(x, na.rm = TRUE))
+dat3<-dat2
+dat3$Y<-NA2mean(dat3$Y)
+set.seed(222)
+result4<-bfunc2(obs, 1000, dat3)
+Betaimp<-result4$beta
+
+
+betacompi<-data.frame(beta=c(estimate, Betaimp), Y = c(rep("No Missing", 1000), rep("Mean Imputation", 1000)))
+p<-ggplot(betacompi, aes(x=beta, fill= Y)) +
+    geom_histogram(binwidth=.01, alpha=.5, position="identity")+
+    labs(title = "Fig 5. Comparison of estimate beta with or without mean imputation")
+ggplotly()
+temp<-data.frame(v1=c(mean(estimate), sqrt(var(estimate)), 2*1.96* sqrt(var(estimate))),
+                 v2=c(mean(Betaimp), result4$nc/(2*1.96), result4$nc))
+colnames(temp)<-c("No Missing", "Mean Imputation")
+row.names(temp)<-c("Beta", "SE", "Coverage")
+xyTable(temp)
+```
+
+(e).Use the bootstrap to estimate the 95% CI for βˆ after imputation:
+```{r}
+bfunc3<-function(n, r, data){
+  beta<-NULL
+  for (i in 1:r){
+    ind <- sample(c(1:n),n,replace = T)	# pick random indices
+    data[ind,]$Y<-NA2mean(data[ind,]$Y)
+    beta<-c(beta, lm(Y~X, data = data[ind,])$coef[2])
+  }
+  nc<-2*1.96*sqrt(var(beta))
+  pc<--beta[rank(beta)==round((r+1)*0.025)]+beta[rank(beta)==round((r+1)*(1-0.025))]
+  return(list(beta = beta, nc = nc, pc = pc))
+}
+results<-bfunc3(dim(dat2)[1], 1000, dat2)
+#95% CI by SD method
+paste0("[",format(mean(results$beta)-results$nc/2, digits = 3), ",",
+       format(mean(results$beta)+results$nc/2, digits = 3), "]")
+#95% CI by percentile method
+paste0("[",format(mean(results$beta)-results$pc/2, digits = 3), ",",
+       format(mean(results$beta)+results$pc/2, digits = 3), "]")
+```
+
+95% CI by SD method is [0.155,0.283].
+       by percentile method is: [0.154,0.283].
+       
+3. Multiple Testing
+(a). The simulated code was shown as below:
+```{r}
+#generate x variables and Y variables
+set.seed(223)
+sigma0<-diag(rep(1, 100))
+dt<-rmvnorm(n=1000, mean = rep(0,100), sigma = sigma0)
+beta<-rep(0.22, 10)
+#calculate beta*x
+z<-dt[1:1000,1:10]%*%beta
+pr = 1/(1+exp(-z))         # pass through an inv-logit function
+y = rbinom(1000,1,pr)      # bernoulli response variable
+df = data.frame(y=y, as.data.frame(dt))
+```
+
+(b). Total 21 variables has a p-value less than 0.1. We are expected to get $100*10%=10$ p-values less than 0.1. Based on the rank order of p-values, I found the true association is always on top of the "false" association.
+```{r}
+#calculate univariate association by ttest
+fit<-glm(y~.,data=df,family="binomial")
+p_value<-coef(summary(fit))[,4]
+length(which(p_value<0.1)[-1])
+rank(p_value[names(p_value)%in%names(which(p_value<0.1)[-1])])
+```
+
+(c). The 2-by-2 table was shown as below: The false positive is 11 and false negative is 0; The true positive is 10 and true negative is 79.
+```{r}
+label<-c(rep(1, 10), rep(0, 90))
+prediction<-ifelse(p_value[-1]<=0.1, 1, 0)
+confusionMatrix(prediction, label)
+```
+
+(d). Here we used Bonferroni's correction to control type I error (controlling FWER) and BH's method to control FDR. The 2-by-2 tables were shown as below:
+```{r}
+#controling FWER
+p_bon<-p.adjust(p_value, method="bonferroni")
+prediction<-ifelse(p_bon[-1]<=0.1, 1, 0)
+confusionMatrix(prediction, label)
+#controling FDR
+p_bh<-p.adjust(p_value, method="BH")
+prediction<-ifelse(p_bh[-1]<=0.1, 1, 0)
+confusionMatrix(prediction, label)
+```
+
+#Working with the data
+4. Model Selection
+(a). Perform 10-fold cross-validation to determine the optimal degree of freedom:
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+#read data
+setwd("C:/Users/bitga/Downloads/diabetes-data")
+dtt<-read.table("data-07", col.names = c("Date", "Time", "Code", "Value"))
+dat0<-dtt %>% filter(Code == 58|Code == 60|Code == 62)
+dat0$Code<-factor(dat0$Code, labels = c("Pre-breakfast",
+                                      "Pre-lunch",
+                                      "Pre-dinner"))
+dat0$Date<-as.character(dat0$Date)
+dat0$Time<-as.character(dat0$Time)
+dat0$Date_time<-paste(dat0$Date, dat0$Time)
+dat0$Date_time<-as.POSIXct(dat0$Date_time, format = "%m-%d-%Y %H:%M")
+```
+
+```{r, warning=FALSE}
+library(splines)
+library(boot)
+cv.error10 = NULL
+# The polynomial degree
+degree=1:20
+# A fit for each degree
+for(d in degree){
+  glm.fit=glm(Value~ns(Date_time, df = d), data = dat0)
+  set.seed(7)
+  cv.error10[d]=cv.glm(dat0,glm.fit,K=10)$delta[1]
+}
+p <- plot_ly(x = ~degree, y = ~cv.error10, type = 'scatter', mode = 'lines', name = 'CV  
+             Error')%>%
+         layout(title = 'Fig 3. 10-fold CV-error for Different Degree of Freedom',
+                xaxis = list(title = 'Degree of Freedom', zeroline = TRUE),
+                yaxis = list(title = 'CV Error'))
+p
+which(cv.error10==min(cv.error10))
+```
+
+
+
+Based on the minimal CV error in degree of freedom of 3, I found the optimal degree of freedom is 3
+
+(b). Repeat it using leave-one-out cross validation. Based on test error, I found the optimal degree of freedom is 3.
+```{r}
+loocv=function(fit){
+  h=lm.influence(fit)$h
+  mean((residuals(fit)/(1-h))^2)
+}
+degree=1:20
+cv.error=NULL
+# A fit for each degree
+for(d in degree){
+  glm.fit=glm(Value~ns(Date_time, df = d), data = dat0)
+  set.seed(23)
+  cv.error[d]=loocv(glm.fit)
+}
+# The plot of the errors
+p <- plot_ly(x = ~degree, y = ~cv.error, type = 'scatter', mode = 'lines', name = 'CV  
+             Error')%>%
+         layout(title = 'Fig 3. Leave-one-out CV for Different Degree of Freedom',
+                xaxis = list(title = 'Degree of Freedom', zeroline = TRUE),
+                yaxis = list(title = 'CV Error'))
+p
+which(cv.error==min(cv.error))
+```
+
+(c). Pick the best model using AIC and BIC. After controlling the degree of freedom from 2-20, I found the best model based on AIC is the one with a degree of freedom of 3 (two knots) and the best model based on BIC is the one with a degree of freedom of 2 (1 knot).
+```{r}
+aic = NULL
+# The polynomial degree
+degree=1:20
+# A fit for each degree
+for(d in degree){
+  glm.fit=glm(Value~ns(Date_time, df = d), data = dat0)
+  set.seed(9)
+  aic[d]=AIC(glm.fit)
+}
+p <- plot_ly(x = ~degree, y = ~aic, type = 'scatter', mode = 'lines', name = 'AIC')%>%
+         layout(title = 'Fig 5. Model selection by AIC',
+                xaxis = list(title = 'Degree of Freedom', zeroline = TRUE),
+                yaxis = list(title = 'AIC'))
+p
+which(aic==min(aic))
+
+bic = NULL
+# The polynomial degree
+degree=1:20
+# A fit for each degree
+for(d in degree){
+  glm.fit=glm(Value~ns(Date_time, df = d+1), data = dat0)
+  set.seed(10)
+  bic[d]=BIC(glm.fit)
+}
+p <- plot_ly(x = ~degree+1, y = ~bic, type = 'scatter', mode = 'lines', name = 'BIC')%>%
+         layout(title = 'Fig 6. Model selection by BIC',
+                xaxis = list(title = 'Degree of Freedom', zeroline = TRUE),
+                yaxis = list(title = 'BIC'))
+p
+which(bic==min(bic))+1
+
+```
+
+(d). Use a likelihood ratio test: here, we compared two models with degree of freedom of 3 and 5. Based on the results of likelihood ratio test, I found adding more knots in the spline does not significantly improve model fitting.
+```{r, warning=FALSE}
+library(lmtest)
+fit1<-glm(Value~ns(Date_time, df = 3), data = dat0)
+fit2<-glm(Value~ns(Date_time, df = 5), data = dat0)
+lrtest(fit1, fit2)
+```
+
+(e).
+```{r}
+spline_ratio<-function(dat, ratio, d){
+  inValidation <- createDataPartition(dat$Value, p=ratio, list=FALSE)
+  train<-dat[inValidation,]
+  test<-dat[-inValidation,]
+  fit<-lm(Value~ns(Date_time, df = d), data = train)
+  prediction<-predict(fit, newdata = data.frame(Date_time=test$Date_time), type = "response")
+  return(RMSE(prediction, test$Value))
+}
+
+set.seed(90)
+#create different ratio with degree of freedom of 3
+rs<-do.call(rbind, lapply(seq(0.05, 0.95, 0.1), function(x){
+  Residuals<-spline_ratio(dat0, x, 3)
+  return(data.frame(ratio = x, error = Residuals))
+})
+)
+#visualize the results
+p <- plot_ly(rs, x = ~ratio, y = ~error, type = 'scatter', mode = 'lines', name = 'RMSE')%>%
+         layout(title = 'Fig 6. RMSE by Different Split Size',
+                xaxis = list(title = 'Split Size', zeroline = TRUE),
+                yaxis = list(title = 'RMSE'))
+p
+
+```
+
+Based on the above plot, I found the optimal split size is 0.65.
+
+5. Permutation test
+(a). Perform a two-sided test:
+```{r, message=FALSE, warning=FALSE}
+library(xlsx)
+setwd("C:/Users/bitga/Downloads/")
+mice_dat<-read.xlsx("Data_Cortex_Nuclear.xls", 1, header = TRUE)
+mice_dat$MouseID<-as.character(mice_dat$MouseID)
+t.test(mice_dat$RRP1_N[mice_dat$Genotype=="Control"], mice_dat$RRP1_N[mice_dat$Genotype=="Ts65Dn"])
+```
+
+We found the p-value is 0.0276 which is less than 0.05, suggesting the expression of RRP1_N in control group is significantly different than the one in Ts65Dn group.
+
+(b). Perform permutation test to compare group means: after randomly shuffle the label of genotype, I found the p value is 0.014 which is less than 0.05, suggesting a significant difference in the group means.
+```{r}
+#random shuffle the label of genotype
+means=NULL
+for(i in 1:1000){
+  set.seed(i)
+  label<-sample(mice_dat$Genotype, length(mice_dat$Genotype))
+  means<-c(means, mean(mice_dat$RRP1_N[label=="Control"])-mean(mice_dat$RRP1_N[label=="Ts65Dn"]))
+}
+p.value<-sum(abs(means>abs(mean(mice_dat$RRP1_N[mice_dat$Genotype=="Control"])-mean(mice_dat$RRP1_N[mice_dat$Genotype=="Ts65Dn"]))))/1000
+p.value
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

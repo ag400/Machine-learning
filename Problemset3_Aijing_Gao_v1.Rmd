@@ -1,0 +1,525 @@
+---
+title: "Problemset3_Aijing_Gao"
+author: "Aijing Gao"
+date: "September 30, 2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###Simulation
+1. Explore Clustering
+a). Set ICC=0.3, using the function from the last homework to simulate data:
+
+```{r, warning=FALSE}
+library(ggplot2)
+library(plotly)
+library(ggfortify)
+library(colorRamps)
+library(htmlTable)
+#this function return simulated ICC data
+get_data<-function(target, n, k, mu, sigmaw){
+  #create label for group
+  group <- factor(rep(1:k, each = n/k))
+  #create simulated y value for simulated target
+  sigmab<-sqrt(sigmaw^2*target/(1-target))
+  value <- c(sapply(rnorm(k,mu,sigmab), function(mui) rnorm(n/k, mui, sigmaw)))#observations
+  data <- data.frame(group = group, value = value)
+  return(data)
+}
+
+
+```
+
+Here, a function was developed to calculate the purity when evaluating clustering algorithm:
+$$purity(\omega, c)=\frac{1}{N}\sum^{k}max_{j}|\omega_k \cap c_j|$$
+```{r}
+#this function returns purity after applying clustering algorithms
+purity<-function(clusters, classes) {
+        sum(apply(table(classes, clusters), 2, max)) / length(clusters)
+}
+```
+
+```{r, echo=FALSE}
+#function to get multiplots
+###Function to plot multiple gg-plots
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+Using the above two functions to evaluate the performance of k-means clustering
+```{r}
+#set seed for simulations
+set.seed(1117)
+#get simulated data
+dat<-replicate(50, get_data(target = 0.3, n = 100, k = 3, mu = 5, sigmaw = 0.1)$value)
+dat<-as.data.frame(dat)
+dat$group<-get_data(target = 0.3, n = 100, k = 3, mu = 5, sigmaw = 0.1)$group
+#apply k-mean cluster analysis with k=5
+fit<-kmeans(dat[,c(1:50)], 5)
+# append cluster assignment
+dat <- data.frame(dat, fit$cluster)
+#calculate the rate of misclassified observations
+rate<-1-purity(dat$fit.cluster, dat$group)
+
+```
+
+
+Based on the number of misclassification, we could conclude that when we applied 5-means
+clustering on a data with a real group of three, there are nearly 31.3% false rate.
+
+b). Apply different ICC value from 0.1 to 0.9 and visualize the rate of purity against ICC by ggplot2:
+
+```{r}
+#this function returns purity for measuring accuracy of k-mean clustering
+get.purity<-function(target, n, k, kmeans, p){
+       #get simulated data
+       dat<-replicate(p, get_data(target, n, k, mu = 5, sigmaw = 0.1)$value)
+       dat<-as.data.frame(dat)
+       dat$group<- as.numeric(get_data(target, n, k, mu = 5, sigmaw = 0.1)$group)
+       #apply k-mean cluster analysis with k=5
+       set.seed(222)
+       fit<-kmeans(dat[,c(1:p)], kmeans)
+       #append cluster assignment
+       dat <- data.frame(dat, fit$cluster)
+       #calculate the rate of purity
+       return(purity(dat$fit.cluster, dat$group))
+}
+
+#get results for varing ICC
+set.seed(24)
+purity_result<-sapply(seq(0.1,0.9, 0.05), function(x) get.purity(target = x, n = 100, k = 3,    
+                                                         kmeans = 3, p = 50))
+summary<-data.frame(ICC = seq(0.1,0.9, 0.05), purity_result)
+
+#using ggplot2 to visualize the results
+ggplot(data = summary, aes(x = ICC, y = purity_result))+
+  geom_line()+
+  geom_point(size=2)+
+  scale_y_continuous(name='Purity')+
+  geom_hline(yintercept = 1, linetype = 'dashed')+
+  expand_limits(y=0)+
+  theme_classic()
+
+```
+
+
+We found when ICC reaches to 0.2, there is perfect clustering after applying 3-means clustering on a simulated data with a group of 3.The required ICC for effective clustering would be at least 0.2.
+
+c). Using minimum ICC as 0.2. The data with noise variables were generated as following:
+```{r}
+get_noise_data<-function(x, p = 50, n = 100, k =3, ICC = 0.2){
+  if(x!= p && x!=0){
+    temp1<- as.data.frame(replicate(p-x, get_data(ICC, n, k, mu = 5, sigmaw = 
+                                    0.1)$value))
+    temp2<- as.data.frame(replicate(x, get_data(target = 0, n, k, mu = 5, 
+                                                sigmaw = 0.1)$value))
+    temp<- data.frame(group = get_data(ICC, n, k, mu = 5, sigmaw = 
+                                0.1)$group , temp1, temp2)}
+  #if all variables are noisy
+  if(x == p){
+    temp<-as.data.frame(replicate(p, get_data(target = 0, n, k, mu = 5, sigmaw 
+                                              = 0.1)$value))
+    temp<-data.frame(group = get_data(target = 0, n, k, mu = 5, sigmaw = 
+                                  0.1)$group, temp)
+  }
+  #none of the variables are noisy
+  if(x == 0){
+    temp<-as.data.frame(replicate(p, get_data(target = ICC, n, k, mu = 5, 
+                                              sigmaw = 0.1)$value))
+    temp<-data.frame(group = get_data(target = ICC, n, k, mu = 5, sigmaw = 
+                                  0.1)$group, temp)
+  }
+  names(temp)<-c("group", paste0("X", c(1:p)))
+  return(temp)
+}
+
+#number of noise variables t
+get.purity.v2<-function(t, k, kmeans, n = 100, p =50, icc = 0.2){
+       dat<-get_noise_data(x = t, p, n, k, icc)
+       set.seed(222)
+       fit<-kmeans(dat[,c(2:(p+1))], kmeans)
+       #append cluster assignment
+       dat <- data.frame(dat, fit$cluster)
+       #calculate the rate of misclassification
+       return(purity(dat$fit.cluster, dat$group))
+}
+
+set.seed(47)
+#summary the results for varying noise variables
+sum<-sapply(seq(0, 50, 5), function(x) get.purity.v2(x, k = 3, kmeans = 3, 100, 50, 0.2))
+#visualize the results by ggplot2
+temp<-data.frame(Noisy = seq(0, 50, 5), Purity = sum)
+ggplot(data = temp, aes(x = Noisy, y = Purity))+
+  geom_line()+
+  geom_point(size=2)+
+  scale_y_continuous(name ='Purity')+
+  scale_x_continuous(name ='Number of Noisy Variables')+
+  expand_limits(y=0)+
+  theme_classic()
+
+```
+
+Comments: when the number of noisy variables increases, the purity of k-means clustering is reduced especially when it's more than the number of non-noisy variables.
+
+d). when we control the number of noisy variables and target ICC:
+```{r, warning=FALSE}
+set.seed(117)
+ICC<-sample(seq(0.05, 0.95, 0.001),200)
+noisy<-sample(seq(0, 50, 1), 200, replace = TRUE)
+purity0<-mapply(function(x,y) get.purity.v2(x, 3, 3, 100, 50, y), noisy, ICC)
+temp2<-data.frame(noisy, ICC, Purity = purity0)
+#scale the variables of noisy variable and ICC value
+temp2[,c(1:2)]<-scale(temp2[,c(1:2)])
+#fit lm model to explore interaction
+model<-lm(Purity~ noisy*ICC, data = temp2)
+summary(model)
+
+#visualize the results
+pp<-function(n){
+  set.seed(117)
+  ICC<-sample(seq(0.05, 0.95, 0.001), n)
+  Noisy<-sample(seq(0, 50, 1), n, replace = TRUE)
+  df<-expand.grid(x = ICC, y = Noisy)
+  df$Purity<-mapply(function(x,y) get.purity.v2(x, 3, 3, 100, 50, y), Noisy, ICC)
+  df
+}
+p <- ggplot(pp(200), aes(x=x,y=y))
+p <- p + geom_tile(aes(fill=Purity))+
+     scale_x_continuous(name ='ICC')+
+     scale_y_continuous(name ='Number of Noisy Variables')+
+     scale_color_gradientn(colours=matlab.like(5))+
+     theme_classic()
+     
+ggplotly(p)
+
+
+```
+
+Based on the ANOVA table, we could conclude that purity by k-means clustering is negatively correlated with the number of noisy variables and positively correlated with ICC value. In addition, we observed significant interaction between number of noisy variables. According to the plot, we found more low purity occurrs when ICC is low and the number of noisy variables is large.
+
+2.PCA and clustering
+When ICC=0.5, it's likely to uncover clusters. Biplot of first two PCs were shown as below:
+```{r, echo=FALSE}
+#getting simulated data from 1.b
+set.seed(24)
+dat3<-replicate(50, get_data(0.5, 100, 3, mu = 5, sigmaw = 0.1)$value)
+dat3<-as.data.frame(dat3)
+dat3$group<- as.character(get_data(0.5, 100, 3, mu = 5, sigmaw = 0.1)$group)
+#apply pca
+pca1 = prcomp(dat3[,-51], center = TRUE)
+#explained variance
+expl.var <- pca1$sdev^2/sum(pca1$sdev^2)*100 # percent explained variance
+cum.var<-cumsum(expl.var)
+#Plot PC in ggplot2
+autoplot(pca1, data = dat3, colour = 'group')
+dat<-data.frame(expl.var, cum.var)
+dat$PC<-1:50
+p<-ggplot(dat, aes(x = PC, y = expl.var)) + geom_point()
+p<-p+xlab("Principal Component")
+p<-p+ylab("Proportion of variance")
+p
+
+```
+
+From the scree plot, we find the first two PCs are meaningful.
+
+b). When the k=4, based on the scree plot, we find the meaningful PCs are the first three. From the biplot, we found there were some overlapping points in group 2 and 4. The group separation by PC1 is not as good as the one when k=3. Thus, we conclude that when the number of "true group" increases, there is more need for meaningful PCs to recapture the orignial structure of the data.
+```{r, echo=FALSE}
+set.seed(24)
+dat4<-replicate(50, get_data(0.5, 100, 4, mu = 5, sigmaw = 0.1)$value)
+dat4<-as.data.frame(dat4)
+dat4$group<- as.character(get_data(0.5, 100, 4, mu = 5, sigmaw = 0.1)$group)
+#apply pca
+pca2 = prcomp(dat4[,-51], center = TRUE)
+#explained variance
+expl.var2 <- pca2$sdev^2/sum(pca2$sdev^2)*100 # percent explained variance
+cum.var2<-cumsum(expl.var2)
+#Plot PC in ggplot2
+autoplot(pca2, data = dat4, colour = 'group')
+dat2<-data.frame(expl.var2, cum.var2)
+dat2$PC<-1:50
+p<-ggplot(dat2, aes(x = PC, y = expl.var2)) + geom_point()
+p<-p+xlab("Principal Component")
+p<-p+ylab("Proportion of variance")
+p
+
+```
+
+###Working with Data
+1. Exploring the data
+a). Descriptive statistics was shown as below:
+```{r, warning=FALSE}
+#set working directory
+library(xlsx)
+library(Hmisc)
+library(cluster)
+library(fpc)
+library(lattice)
+setwd("C:/Users/bitga/Downloads/")
+mice_dat<-read.xlsx("Data_Cortex_Nuclear.xls", 1, header = TRUE)
+mice_dat$MouseID<-as.character(mice_dat$MouseID)
+describe(mice_dat[,c(2:78)])
+gene<-mice_dat
+```
+
+b).Find the missing value, then delete variables with more than 10% missing value and using mean imputation to deal with others.
+```{r}
+N_NA<-sapply(mice_dat[,c(2:78)], function(x) sum(is.na(x)))
+N_NA<-N_NA/dim(mice_dat)[1]
+#remove variables with more than 10% missing values
+gene<-gene[,!names(gene)%in%names(N_NA)[which(N_NA>=0.1)]]
+#a simple function to perform mean imputation
+NA2mean <- function(x) replace(x, is.na(x), mean(x, na.rm = TRUE))
+gene[,c(2:73)]<-lapply(gene[,c(2:73)], NA2mean)
+```
+
+2.a). Perform PCA on imputed expression measurements
+```{r}
+pca = prcomp(gene[,c(2:73)], center = TRUE)
+#explained variance
+expl.var <- pca$sdev^2/sum(pca$sdev^2)*100 # percent explained variance
+cum.var<-cumsum(expl.var)
+#Plot PC in ggplot2
+dat<-data.frame(expl.var, cum.var)
+dat$PC<-1:72
+
+p0<-ggplot(dat, aes(x = PC, y = expl.var)) + geom_point()+geom_line()
+p0<-p0+xlab("Principal Component")
+p0<-p0+ylab("Cumulative Proportion of variance")
+p0
+
+p<-ggplot(dat, aes(x = PC, y = cum.var)) + geom_point()+geom_line()
+p<-p+xlab("Principal Component")
+p<-p+ylab("Cumulative Proportion of variance")
+p
+```
+
+
+According to the scree plot, with around 19 PCs, the cumulative proportional variance reach to nearly 99%.
+
+b). Scale the data and repeat the above process.
+```{r}
+pca3 = prcomp(gene[,c(2:73)], center = TRUE, scale. = TRUE)
+#explained variance
+expl.var <- pca3$sdev^2/sum(pca3$sdev^2)*100 #percent explained variance
+cum.var<-cumsum(expl.var)
+#Plot PC in ggplot2
+dat<-data.frame(expl.var, cum.var)
+dat$PC<-1:72
+p<-ggplot(dat, aes(x = PC, y = expl.var)) + geom_point()+geom_line()
+p<-p+xlab("Principal Component")
+p<-p+ylab("Proportion of variance")
+p
+#variance for each gene expression
+t<-apply(gene[,c(2:73)], 2, var)
+dat0<-data.frame(gene = names(gene[,c(2:73)]), variance = t)
+ggplot(data = dat0, aes(x = gene, y = variance))+
+      geom_point()+
+      theme_classic()+
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 3))
+      
+```
+
+After scaling the data, the explained proportion of variance in the first several PCs were significantly reduced compare to the one without scaling. The possible reason is that there are several outliers of genes with large variance, such as pCAMKII_N.
+
+c).
+```{r, echo=FALSE}
+#plotting to see group separation
+c1<-autoplot(pca, data = mice_dat, colour = "Treatment")
+c2<-autoplot(pca, data = mice_dat, colour = "Genotype")
+c3<-autoplot(pca, data = mice_dat, colour = "Behavior")
+c4<-autoplot(pca, data = mice_dat, colour = "class")
+multiplot(c1, c2, c3, c4, cols = 2)
+```
+
+
+According to the plot, overall, there is no significant good separation by PC1 or PC2 in recapturing homogeneous groups of behaviors, treatment, Genotype, and class. Most of the groups have overlapping observations in the PC space except for behavior. PC2 may have some separation in behavior.
+
+d). i. Fit a logistic regression using PC scores
+```{r}
+temp<-as.data.frame(pca$x)
+temp$Genotype<-ifelse(gene$Genotype == "Control", 0, 1)
+temp$Genotype<-as.factor(temp$Genotype)
+fit <- glm(Genotype~., data = temp, family=binomial(link='logit'))
+summary(fit)
+```
+
+Because I have 72 varibles in my model, I am confronted to an over-fitting problem: too many variables in the model, leading to a perfect separation of genotypes. The consequences is that model likelihood is not defined, and thus I can't get the model to converge.
+
+ii. Using only meaningful PCs to fit the logistic models
+```{r}
+library(pls)
+fit2<-glm(Genotype~., data = temp[,c(1:19, 73)], family=binomial(link='logit'))
+summary(fit2)
+gene$Genotype<-ifelse(gene$Genotype=="Control", 0, 1)
+pcr_model <- pcr(Genotype~., data = gene[,c(2:74)], scale = TRUE, validation = "CV")
+validationplot(pcr_model)
+```
+
+
+We found using the meaningful PCs only still have a good model of fit. By validation plot, we found RMSE for fitted model didn't change a lot after more PCs are adding to the meaningful PCs.
+
+3. Clustering
+a).K-mediods clustering to determine the optimal k
+
+```{r}
+clusters <- hclust(dist(gene[,2:73]))
+plot(clusters, labels = FALSE)
+```
+
+From the cluster dendrogram, k = 2, 3 or 4 may be optimal.
+```{r}
+pamk.best <- pamk(gene[,2:73])
+cat("number of clusters estimated by optimum average silhouette width:", pamk.best$nc, "\n")
+plot(pam(gene[,2:73], pamk.best$nc))
+```
+
+By estimating silhouette width after partitioning, I found the optimal k is 3.
+
+ii. Here, purity was calculated after comparing cluster group and real labels.
+```{r}
+gene$fit.cluster<-cutree(clusters, 3)
+sum0<-data.frame(Treatment = purity(gene$fit.cluster, gene$Treatment),
+                 Genotype = purity(gene$fit.cluster, gene$Genotype),
+                 Behavior = purity(gene$fit.cluster, gene$Behavior),
+                 class = purity(gene$fit.cluster, gene$class))
+sum0<-format(sum0, digits = 3)
+row.names(sum0)<-"Purity"
+htmlTable(sum0, caption = "Table 1. Purity after applying hierachial clustering with optimal k=3")
+
+```
+
+iii) To cluster protein, first we need to calculate correlation matrix and use 1-correlation as dissimlarity index:
+```{r}
+cor_dis<-1-cor(gene[,c(2:73)])
+dis<-as.dist(cor_dis)
+plot(hclust(dis), 
+     main="Dissimilarity = 1 - Correlation", xlab = "Protein", cex = 0.5)
+```
+
+b). Hierarchical Clustering:
+
+i. Cluster Method: Compare complete, single, and average linkage with 4 clusters
+```{r}
+Hs <- hclust(dis, method = "single")
+Ha <- hclust(dis, method = "average")
+Hc <- hclust(dis, method = "complete")
+
+plot(Hs, cex = 0.5)
+plot(Ha, cex = 0.5)
+plot(Hc, cex = 0.5)
+
+#cluster assignment
+assign<-data.frame(Single = cutree(Hs, k =4),
+                   Average = cutree(Ha, k =4),
+                   Complete = cutree(Hc, k =4))
+
+table(assign$Single)
+table(assign$Average)
+table(assign$Complete)
+```
+
+
+Different methods of linkage has very different cluster assignments. For instance, when using single linkage, most of proteins were assigned to one cluster.
+
+ii. Standardizing data: Here, I choose complete linkage
+```{r}
+#standardize the data
+gene_st<-as.data.frame(lapply(gene[,c(2:73)], function(x) (x-mean(x))/sd(x)))
+cor_dis_st<-1-cor(gene_st)
+dis_st<-as.dist(cor_dis_st)
+Hc_st <- hclust(dis_st, method = "complete")
+plot(Hc_st, cex = 0.5)
+table(cutree(Hc_st, k = 4))
+```
+
+
+After standardizing the data of protein expression, the cluster assigment did not change since calculating correlation matrix is not impacted by scaling data.
+
+iii. Distance matrix: Euclidean distance was used instead of correlation distance
+```{r}
+Euc_matrix<-dist(t(gene[,2:73]), method = "euclidean")
+dis_euc<-as.dist(Euc_matrix)
+Hc_euc<-hclust(dis_euc, method = "complete")
+plot(Hc_euc, cex = 0.5)
+table(cutree(Hc_euc, k = 4))
+```
+
+Compare to using correlation distance as distance metrics, more proteins were assigned to one cluster after using Euclidean distance metrics.
+
+
+iv. Sampling the data
+
+```{r, echo=FALSE}
+#sample 20% observations
+
+repsamp<-function(seed){
+  set.seed(seed)
+  samp<-gene[sample(1:nrow(gene), size = floor(0.2*nrow(gene))),]
+  cor_dis_sa<-1-cor(samp[,c(2:73)])
+  dis_sa<-as.dist(cor_dis_sa)
+  Hc_sa <- hclust(dis_sa, method = "complete")
+  return(Hc_sa)
+}
+
+Hc_sa<-repsamp(1)
+plot(Hc_sa, cex = 0.5)
+table(cutree(Hc_sa, k = 4))
+sum1<-sapply(1:5, function(x) as.data.frame(table(cutree(repsamp(x), k =4)))$Freq)
+colnames(sum1)<-paste0("Repeat:", 1:5)
+row.names(sum1)<-paste0("Cluster=", c(1:4))
+htmlTable(sum1, caption = "Table 2. Cluster assignment after sampling (Repeats = 5)")
+```
+
+After repeating sampling process before applying clustering algorithm, we found the results of cluster assignment is similar to the one without sampling.
+
+v. comments on difference: Among the potential factors including linkage method, cluster distance metrics, sampling, and data scaling, I think linkage methods and distance function are the most important factors that impacts on cluster stability.
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,326 @@
+---
+title: "Problem Set 2"
+author: "Aijing Gao"
+date: "September 5, 2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Simulation on ICC
+```{r, message=FALSE}
+library(ICC)
+library(htmlTable)
+library(ggplot2)
+library(gtools)
+library(data.table)
+library(dplyr)
+library(magrittr)
+library(chron)
+library(reshape2)
+library(corrplot)
+library(zoo)
+library(plotly)
+#this function returns simulated data with target ICC (target), number of groups (k), 
+#total sample size (n), overall mean (mu), within standard deviation (sigmaw)
+get_data<-function(target, n, k, mu, sigmaw){
+  #set seed for simulations
+  set.seed(1112)
+  #create label for group
+  group <- factor(rep(1:k, each = n/k))
+  #create simulated y value for simulated target
+  sigmab<-sqrt(sigmaw^2*target/(1-target))
+  value <- c(sapply(rnorm(k,mu,sigmab), function(mui) rnorm(n/k, mui, sigmaw))) # observations
+  data <- data.frame(group = group, value = value)
+  return(data)
+}
+
+#this function return simulated ICC data
+get_data<-function(target, n, k, mu, sigmaw){
+  #determine number in each group
+  number<-sapply(split(1:n, 1:k), length)
+  #create mui for each group
+  sigmab<-sqrt(sigmaw^2*target/(1-target))
+  mui<-rnorm(k,mu,sigmab)
+  data = foreach(i=1:k, .combine = rbind)%dopar%{
+    t<-data.frame(group = rep(i, number[i]), 
+                  value = c(rnorm(number[i], mui[i], sigmaw)))
+    return(t)}
+  data$group<-as.factor(data$group)
+  return(data)
+}
+```
+
+(a) Simulate data with a theoretical ICC of 0.1 and 0.9 across k = 10 groups using a total sample size of n = 100.
+
+```{r}
+#write function to return summarized statistics for simulations
+get_est<-function(target, n, k, mu = 5, sigmaw = 0.1){
+  dat<-get_data(target, n, k, mu, sigmaw)
+  result<-ICCest(dat$group, dat$value)
+  estimate<-paste0(round(result$ICC, digits = 2), 
+                 "[95% CI:", 
+                 round(result$LowerCI, digits = 2),
+                 "-", 
+                 round(result$UpperCI, digits = 2),
+                 "]")
+  Tab<-data.frame(Theoretical = target,
+                Simulated = estimate,
+                `Sample Size` = n,
+                Group = k,
+                lowerbound = result$LowerCI,
+                upperbound = result$UpperCI,
+                ICC = result$ICC)
+  return(Tab)
+}
+
+Tab1<-rbind(get_est(0.1, 100, 10), get_est(0.9, 100, 10))
+
+#Summarize the results from simulation by table
+htmlTable(Tab1[,-c(5:7)], caption = "Table 1. Empirical Analysis of simulations for estimating ICC (n=100; k=10)")
+```
+
+Summarized results were shown in Table 1.
+
+(b). Repeat using a total sample size of n = 1, 000.
+```{r}
+Tab2<-rbind(get_est(0.1, 1000, 10), get_est(0.9, 1000, 10))
+#conclude the results from simulation
+htmlTable(Tab2[,-c(5:7)], caption = "Table 2. Empirical Analysis of simulations for 
+          estimating ICC (n=1000; k=10)")
+```
+
+(c)Keep the sample size at n = 1, 000 but increase the number of groups to k = 100.
+```{r}
+Tab3<-rbind(get_est(0.1, 1000, 100), get_est(0.9, 1000, 100))
+#conclude the results from simulation
+htmlTable(Tab3[,-c(5:7)], caption = "Table 3. Empirical Analysis of simulations
+          for estimating ICC (n=1000 and k=100)")
+```
+
+(d)Comments: Based on Table 1-3, we found with the increase in total sample size and number of groups, the precision of estimated ICC based on simulations also increased. Here we graphically show the result as below:
+```{r, warning=FALSE}
+final<-smartbind(Tab1, Tab2, Tab3)
+final$simulation<- rep(c("1", "2", "3"), each = 2)
+final$Theoretical<-factor(final$Theoretical, labels = c("Theoretical ICC=0.1","Theoretical  ICC=0.9" ))
+#using ggplot2 to visualize the result.
+ggplot(final, aes(x=simulation, y=ICC, color = simulation)) + 
+          geom_errorbar(aes(ymin=lowerbound, ymax=upperbound), width=.1) +
+          geom_line() +
+          geom_point()+
+          xlab('No.of test')+
+          ylab('ICC')+
+          facet_wrap(~Theoretical)+ 
+          scale_color_discrete(name="Simulation",
+                               breaks=c("1", "2", "3"),
+                               labels=c("n=100; k=10", "n=1000; k=10", "n=1000; k=100"))
+
+```
+
+As an attachment, the simulated data were plotted as dot plots.
+```{r, echo = FALSE}
+temp1<-get_data(0.1, 100, 10, 5, 0.1)
+temp2<-get_data(0.1, 1000, 10, 5, 0.1)
+temp3<-get_data(0.1, 1000, 100, 5, 0.1)
+temp1$Simulation<-"n=100, k=10"
+temp2$Simulation<-"n=1000, k=10"
+temp3$Simulation<-"n=1000, k=100"
+final<-rbind(temp1, temp2, temp3)
+ggplot(final, aes(x=group, y = value))+
+    geom_point()+
+    facet_wrap( ~ Simulation, scales = "free")+
+    theme(axis.ticks = element_blank(), axis.text.x = element_blank(), 
+          plot.title = element_text(hjust = 0.5))+
+    ggtitle("ICC=0.1")
+  
+```
+```{r, echo = FALSE}
+temp1<-get_data(0.9, 100, 10, 5, 0.1)
+temp2<-get_data(0.9, 1000, 10, 5, 0.1)
+temp3<-get_data(0.9, 1000, 100, 5, 0.1)
+temp1$Simulation<-"n=100, k=10"
+temp2$Simulation<-"n=1000, k=10"
+temp3$Simulation<-"n=1000, k=100"
+final<-rbind(temp1, temp2, temp3)
+ggplot(final, aes(x=group, y = value))+
+    geom_point()+
+    facet_wrap( ~ Simulation, scales = "free")+
+    theme(axis.ticks = element_blank(), axis.text.x = element_blank(), 
+          plot.title = element_text(hjust = 0.5))+
+    ggtitle("ICC=0.9")
+```
+
+
+#Working with data
+
+1. Summarizing the data
+
+To summarize the data for one person, I choose data-07
+(a). Summarize the data with 3 pre-meal blood glucose measurements (codes 58, 60,
+62).
+```{r, message=FALSE}
+setwd("C:/Users/bitga/Downloads/diabetes-data")
+dat<-read.table("data-07", col.names = c("Date", "Time", "Code", "Value"))
+sum_tab<-dat %>% filter(Code == 58|Code == 60|Code == 62) %>% group_by(Code) %>%
+  summarise(Average = paste0(round(mean(Value, na.rm=TRUE), digits = 2), "(", round(sd(Value),   
+                             digits = 2), ")"), 
+            Min = min(Value), 
+            Max = max(Value),
+            Median = median(Value),
+            q1 = quantile(Value, probs = 1/4),
+            q3 = quantile(Value, probs = 3/4))
+names(sum_tab)[2]<-"Mean (SD)"
+sum_tab$Code<-factor(sum_tab$Code, labels = c("Pre-breakfast", "Pre-lunch", "Pre-dinner"))
+htmlTable(sum_tab, caption = "Table 4. Summary statistics for blood glucose measurement)")
+
+```
+
+Based on the above table, we summarized the pre-meal blood glucose measures using mean, maximum, and minimum value for each code. The summary statistics for Pre-breakfast blood glucose measurement is 182.5294 (range: 80-284); for Pre-lunch blood glucose measurement is 145.2069 (range: 50-300); for Pre-supper blood glucose measurement is 182.6552 (range: 51-274). Pre-breakfast and pre-supper blood glucose tend to be higher than pre-supper blood glucose.
+
+(b). Calculate the ICC
+```{r}
+#subset data with specific codes
+dat0<-dat %>% filter(Code == 58|Code == 60|Code == 62)
+dat0$Code<-factor(dat0$Code)
+ICCest(dat0$Code, dat0$Value)$ICC
+#visualize the data
+ggplot(data = dat0, mapping = aes(x = Code, y = Value)) +
+       geom_point() +
+       xlab("Code")+
+       ylab("Blood glucose measurement") 
+```
+
+Based on the above code, we found the ICC for these three measurements is 0.09503872.
+
+2.(a) Demonstrate the change of blood glucose measurement over time.
+```{r}
+#create an column to illustrate date-time
+dat0$Code<-factor(dat0$Code, labels = c("Pre-breakfast",
+                                      "Pre-lunch",
+                                      "Pre-dinner"))
+dat0$Date<-as.character(dat0$Date)
+dat0$Time<-as.character(dat0$Time)
+dat0$Date_time<-paste(dat0$Date, dat0$Time)
+dat0$Date_time<-as.POSIXct(dat0$Date_time, format = "%m-%d-%Y %H:%M")
+#using ggplot2 to visualize time-series data
+ggplot(data = dat0,
+       mapping = aes(x = Date_time, y = Value, shape = Code, colour = Code)) +
+       geom_point() +
+       geom_line()+
+       xlab("Time")+
+       ylab("Blood glucose measurement") +
+       facet_grid(facets = Code ~ .)
+
+```
+
+(b)Transform the data into wide format on a daily basis
+```{r}
+dat1<-dcast(dat0[,c(1,2,3,4)], Code~Date)
+head(dat1)
+#sum up missing value in the data with wide format
+sum(is.na(dat1))
+```
+We found there are 10 missing values in the transformed data
+
+(c). Correlation plot was created as below:
+```{r}
+dat2<-t(dat1[,-1])
+colnames(dat2)<-c("Pre-breakfast", "Pre-lunch", "Pre-dinner")
+M<-cor(dat2)
+corrplot(M, tl.cex = 0.75, tl.col = "#B2182B")
+#after removing NA values, the figure turns into:
+M1<-cor(dat2, use='complete.obs')
+corrplot(M1,tl.cex = 0.8, tl.col = "#B2182B")
+```
+
+(d). Data imputation 
+i). Carry the last observation forward separately for each of the
+3 categories. Correlation plot was updated as below:
+```{r}
+data_locf_days<-na.locf(dat2)
+M3<-cor(data_locf_days)
+corrplot(M3,tl.cex = 0.75, tl.col = "#B2182B")
+```
+
+ii. Carry the last observation forward from the time of day (i.e.
+impute glucose before lunch using glucose before breakfast). The corrplot was updated as below. 
+
+```{r}
+data_locf_time<-t(na.locf(t(dat2)))
+M4<-cor(data_locf_time, use = "all.obs")
+corrplot(M4, tl.cex = 0.8, tl.col = "#B2182B")
+```
+
+Comments on the two different approaches: I think LOCF used according to the code of a day is better than the category. According to the answer 1b, we got a ICC value of 0.09 for each measurement, which suggested that blood glucose measurement in each code by different dates (within group) did not strongly resemble to each other while blood glucose measurement in each day by different code strongly resemble to each other (between group). 
+
+#Smoothing
+(a)Using lowess function to smooth the time series plot with a binwidth of 0.1
+```{r, message=FALSE, warning=FALSE}
+#using ggplot2 to visualize time-series data and lowess function to smooth the curves
+ggplot(data = dat0,
+       mapping = aes(x = Date_time, y = Value, shape = Code, colour = Code)) +
+       stat_smooth(method = "loess", span = 0.1)+
+       geom_point() +
+       geom_line()+
+       xlab("Time")+
+       ylab("Blood glucose measurement") +
+       facet_grid(facets = Code ~ .)
+
+```
+
+(b)Using lowess function to smooth the time series plot with a binwidth of 0.9
+```{r}
+ggplot(data = dat0,
+       mapping = aes(x = Date_time, y = Value, shape = Code, colour = Code)) +
+       stat_smooth(method = "loess", span = 0.9)+
+       geom_point() +
+       geom_line()+
+       xlab("Time")+
+       ylab("Blood glucose measurement") +
+       facet_grid(facets = Code ~ .)
+```
+
+(c) When the binwidth is very small, the curves seems not to be smoothed.
+
+(d) As the binwidth (Span) changes, the accuracy of fitted smoothed curves would also be changed. There is a trade-off between fidelity and smoothness. When span is 0.1, there is nearly no smoothing. When span is 0.9, the accuracy of fitted curves is low. Thus I choose a middle value between 0.1 and 0.9, which is 0.5.
+
+
+```{r}
+ggplot(data = dat0,
+       mapping = aes(x = Date_time, y = Value, shape = Code, colour = Code)) +
+       stat_smooth(method = "loess", span = 0.5)+
+       geom_point() +
+       geom_line()+
+       xlab("Time")+
+       ylab("Blood glucose measurement") +
+       facet_grid(facets = Code ~ .)
+```
+
+Here I used moving average to smooth the curves
+```{r}
+dat.zoo<-zoo(dat0$Value, dat0$Date_time)
+#calculate moving average by the windows of 5
+moving.mean<-rollmean(dat.zoo, 5, fill = "extend")
+#add it to existing data frame
+dat0$mv.mean<-coredata(moving.mean)
+ggplot(data = dat0,
+       mapping = aes(x = Date_time, y = Value, shape = Code, colour = Code)) +
+       geom_point() +
+       geom_line(linetype = "dashed")+
+       geom_line(aes(y = moving.mean))+
+       xlab("Time")+
+       ylab("Blood glucose measurement") +
+       facet_grid(facets = Code ~ .)
+```
+
+Based on the plots, I think LOESS smoothing is better than running mean. Curves smoothed by LOESS are visually more elegant and had less roughness than by running mean. 
+
+#Comments
+I compared my results with Jing Lyu's. The major results including simulation and data visualization were comparable. Here are some differences:
+1). Jing used a function from a package to summarize statistics for blood glucose by different code, which is nice and presented more information than mine.
+2). In smoothing questions, Jing used LOESS function differently on different codes (i.e. with different span size). I used ggplot2 and its smoothing feature in which the span size remains constant across different codes.
+3). Jing used kernal smoothing in question 2d) while I used moving mean as an alternative to LOESS. Jing thought kernal smoothing is better than LOESS in this scenario.
